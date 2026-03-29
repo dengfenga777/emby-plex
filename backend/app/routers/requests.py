@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.orm import Session, joinedload
 
 from ..config import Settings
@@ -15,6 +15,7 @@ from ..services.request_workflow import (
     add_request_log,
     build_submission_failure_message,
     can_view_request,
+    find_existing_active_request,
     submit_request_to_moviepilot,
     sync_request_status,
     transition_request_status,
@@ -23,16 +24,47 @@ from ..services.request_workflow import (
 router = APIRouter(tags=["requests"])
 
 
+def build_existing_subscription_note(subscription_note: str | None) -> str:
+    if subscription_note:
+        return f"Existing subscription found in MoviePilot: {subscription_note}"
+    return "Existing subscription found in MoviePilot."
+
+
+def serialize_request_detail(request: Request, *, request_reused: bool = False) -> RequestDetail:
+    detail = RequestDetail.model_validate(request)
+    if request_reused:
+        return detail.model_copy(update={"request_reused": True})
+    return detail
+
+
 @router.post("/requests", response_model=RequestDetail, status_code=status.HTTP_201_CREATED)
 async def create_request(
     payload: RequestCreate,
+    response: Response,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     settings: Settings = Depends(get_app_settings),
 ) -> RequestDetail:
-    moviepilot_service = MoviePilotService(settings)
     initial_status = RequestStatus.pending if settings.require_admin_approval else RequestStatus.approved
 
+    existing_match = find_existing_active_request(
+        db,
+        source_id=payload.source_id,
+        media_type=payload.media_type,
+    )
+    existing_request = None
+    if existing_match is not None:
+        existing_request = (
+            db.query(Request)
+            .options(joinedload(Request.user), joinedload(Request.logs))
+            .filter(Request.id == existing_match.id)
+            .first()
+        )
+    if existing_request is not None:
+        response.status_code = status.HTTP_200_OK
+        return serialize_request_detail(existing_request, request_reused=True)
+
+    moviepilot_service = MoviePilotService(settings)
     request = Request(
         user_id=current_user.id,
         title=payload.title,
@@ -55,7 +87,32 @@ async def create_request(
         note="Request created.",
     )
 
-    if not settings.require_admin_approval:
+    availability = None
+    if settings.moviepilot_mode == "api":
+        try:
+            availability = await moviepilot_service.inspect_media(request)
+        except MoviePilotError:
+            availability = None
+
+    if availability and availability.exists_in_library:
+        request.moviepilot_task_id = f"library:{availability.library_item_id}"
+        transition_request_status(
+            db,
+            request,
+            RequestStatus.finished,
+            operator="system:availability-check",
+            note="Media already exists in MoviePilot library.",
+        )
+    elif availability and availability.has_subscription:
+        request.moviepilot_task_id = f"subscribe:{availability.subscription_id}"
+        transition_request_status(
+            db,
+            request,
+            RequestStatus.submitted_to_moviepilot,
+            operator="system:availability-check",
+            note=build_existing_subscription_note(availability.subscription_note),
+        )
+    elif not settings.require_admin_approval:
         try:
             await submit_request_to_moviepilot(
                 db,
@@ -81,7 +138,7 @@ async def create_request(
         .filter(build_request_lookup_filter(request.id))
         .first()
     )
-    return RequestDetail.model_validate(hydrated)
+    return serialize_request_detail(hydrated)
 
 
 @router.get("/my/requests", response_model=list[RequestSummary])
@@ -125,4 +182,4 @@ async def get_request_detail(
     moviepilot_service = MoviePilotService(settings)
     await sync_request_status(db, request, moviepilot_service)
     db.refresh(request)
-    return RequestDetail.model_validate(request)
+    return serialize_request_detail(request)

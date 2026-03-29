@@ -89,6 +89,7 @@ class RequestSummary(BaseModel):
     admin_note: str | None
     created_at: datetime
     updated_at: datetime
+    request_reused: bool = False
 
 
 class RequestDetail(RequestSummary):
@@ -102,6 +103,24 @@ class AdminRequestSummary(RequestSummary):
 
 class AdminAction(BaseModel):
     note: str | None = None
+
+
+class AdminBatchAction(BaseModel):
+    request_ids: list[str] = Field(min_length=1, max_length=50)
+    note: str | None = None
+
+
+class AdminBatchSkippedItem(BaseModel):
+    request_id: str
+    detail: str
+
+
+class AdminBatchActionResult(BaseModel):
+    processed_count: int
+    skipped_count: int
+    processed_ids: list[str]
+    skipped: list[AdminBatchSkippedItem]
+    items: list["RequestDetail"]
 
 
 class AdminResourceCandidate(BaseModel):

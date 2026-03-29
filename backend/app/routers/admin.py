@@ -10,10 +10,18 @@ from ..enums import RequestStatus
 from ..models import Request, User
 from ..schemas import (
     AdminAction,
+    AdminBatchAction,
+    AdminBatchActionResult,
+    AdminBatchSkippedItem,
     AdminDownloadAction,
     AdminRequestSummary,
     AdminResourceCandidate,
     RequestDetail,
+)
+from ..services.notifications import (
+    build_batch_summary_text,
+    build_request_status_notification_text,
+    send_telegram_message,
 )
 from ..services.request_identity import build_request_lookup_filter
 from ..services.moviepilot import MoviePilotError, MoviePilotService
@@ -39,6 +47,15 @@ def get_request_or_404(db: Session, request_id: str) -> Request:
     return request
 
 
+def get_request_or_none(db: Session, request_id: str) -> Request | None:
+    return (
+        db.query(Request)
+        .options(joinedload(Request.user), joinedload(Request.logs))
+        .filter(build_request_lookup_filter(request_id))
+        .first()
+    )
+
+
 def ensure_admin_actionable(request: Request) -> None:
     if request.status not in {RequestStatus.pending, RequestStatus.failed, RequestStatus.approved}:
         raise HTTPException(
@@ -62,6 +79,99 @@ def transition_to_approved_if_needed(
         RequestStatus.approved,
         operator=f"admin:{admin_user.tg_user_id}",
         note=note or "Approved by admin.",
+    )
+
+
+def serialize_request_detail(request: Request) -> RequestDetail:
+    return RequestDetail.model_validate(request)
+
+
+async def execute_subscribe_action(
+    db: Session,
+    request: Request,
+    *,
+    admin_user: User,
+    settings: Settings,
+    note: str | None,
+) -> Request:
+    ensure_admin_actionable(request)
+
+    moviepilot_service = MoviePilotService(settings)
+    transition_to_approved_if_needed(db, request, admin_user, note)
+
+    try:
+        await submit_request_to_moviepilot(
+            db,
+            request,
+            moviepilot_service,
+            operator=f"admin:{admin_user.tg_user_id}",
+        )
+    except MoviePilotError as exc:
+        transition_request_status(
+            db,
+            request,
+            RequestStatus.failed,
+            operator=f"admin:{admin_user.tg_user_id}",
+            note=build_submission_failure_message(exc),
+        )
+
+    return request
+
+
+def execute_reject_action(
+    db: Session,
+    request: Request,
+    *,
+    admin_user: User,
+    note: str | None,
+) -> Request:
+    if request.status in {RequestStatus.rejected, RequestStatus.finished}:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Request cannot be rejected from {request.status.value}.",
+        )
+
+    transition_request_status(
+        db,
+        request,
+        RequestStatus.rejected,
+        operator=f"admin:{admin_user.tg_user_id}",
+        note=note or "Rejected by admin.",
+    )
+    return request
+
+
+def dedupe_request_ids(request_ids: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for request_id in request_ids:
+        if request_id in seen:
+            continue
+        seen.add(request_id)
+        deduped.append(request_id)
+    return deduped
+
+
+def build_batch_response(
+    items: list[Request],
+    skipped: list[AdminBatchSkippedItem],
+) -> AdminBatchActionResult:
+    return AdminBatchActionResult(
+        processed_count=len(items),
+        skipped_count=len(skipped),
+        processed_ids=[item.id for item in items],
+        skipped=skipped,
+        items=[serialize_request_detail(item) for item in items],
+    )
+
+
+async def notify_request_status_change(settings: Settings, request: Request) -> None:
+    if request.user is None:
+        return
+    await send_telegram_message(
+        settings,
+        chat_id=request.user.tg_user_id,
+        text=build_request_status_notification_text(request),
     )
 
 
@@ -117,30 +227,18 @@ async def subscribe_request(
     settings: Settings = Depends(get_app_settings),
 ) -> RequestDetail:
     request = get_request_or_404(db, request_id)
-    ensure_admin_actionable(request)
-
-    moviepilot_service = MoviePilotService(settings)
-    transition_to_approved_if_needed(db, request, admin_user, payload.note)
-
-    try:
-        await submit_request_to_moviepilot(
-            db,
-            request,
-            moviepilot_service,
-            operator=f"admin:{admin_user.tg_user_id}",
-        )
-    except MoviePilotError as exc:
-        transition_request_status(
-            db,
-            request,
-            RequestStatus.failed,
-            operator=f"admin:{admin_user.tg_user_id}",
-            note=build_submission_failure_message(exc),
-        )
+    await execute_subscribe_action(
+        db,
+        request,
+        admin_user=admin_user,
+        settings=settings,
+        note=payload.note,
+    )
 
     db.commit()
     db.refresh(request)
-    return RequestDetail.model_validate(request)
+    await notify_request_status_change(settings, request)
+    return serialize_request_detail(request)
 
 
 @router.post("/requests/{request_id}/download", response_model=RequestDetail)
@@ -187,30 +285,115 @@ async def direct_download_request(
 
     db.commit()
     db.refresh(request)
-    return RequestDetail.model_validate(request)
+    await notify_request_status_change(settings, request)
+    return serialize_request_detail(request)
 
 
 @router.post("/requests/{request_id}/reject", response_model=RequestDetail)
-def reject_request(
+async def reject_request(
     request_id: str,
     payload: AdminAction,
     db: Session = Depends(get_db),
     admin_user: User = Depends(get_admin_user),
+    settings: Settings = Depends(get_app_settings),
 ) -> RequestDetail:
     request = get_request_or_404(db, request_id)
-    if request.status in {RequestStatus.rejected, RequestStatus.finished}:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Request cannot be rejected from {request.status.value}.",
-        )
-
-    transition_request_status(
+    execute_reject_action(
         db,
         request,
-        RequestStatus.rejected,
-        operator=f"admin:{admin_user.tg_user_id}",
-        note=payload.note or "Rejected by admin.",
+        admin_user=admin_user,
+        note=payload.note,
     )
     db.commit()
     db.refresh(request)
-    return RequestDetail.model_validate(request)
+    await notify_request_status_change(settings, request)
+    return serialize_request_detail(request)
+
+
+@router.post("/batch/requests/subscribe", response_model=AdminBatchActionResult)
+async def batch_subscribe_requests(
+    payload: AdminBatchAction,
+    db: Session = Depends(get_db),
+    admin_user: User = Depends(get_admin_user),
+    settings: Settings = Depends(get_app_settings),
+) -> AdminBatchActionResult:
+    items: list[Request] = []
+    skipped: list[AdminBatchSkippedItem] = []
+
+    for request_id in dedupe_request_ids(payload.request_ids):
+        request = get_request_or_none(db, request_id)
+        if request is None:
+            skipped.append(AdminBatchSkippedItem(request_id=request_id, detail="Request not found."))
+            continue
+
+        try:
+            await execute_subscribe_action(
+                db,
+                request,
+                admin_user=admin_user,
+                settings=settings,
+                note=payload.note,
+            )
+            items.append(request)
+        except HTTPException as exc:
+            skipped.append(AdminBatchSkippedItem(request_id=request_id, detail=str(exc.detail)))
+
+    db.commit()
+    for item in items:
+        db.refresh(item)
+        await notify_request_status_change(settings, item)
+    await send_telegram_message(
+        settings,
+        chat_id=admin_user.tg_user_id,
+        text=build_batch_summary_text(
+            action_label="批量通过",
+            processed_count=len(items),
+            skipped_count=len(skipped),
+            processed_ids=[str(item.public_id or item.id) for item in items],
+        ),
+    )
+    return build_batch_response(items, skipped)
+
+
+@router.post("/batch/requests/reject", response_model=AdminBatchActionResult)
+async def batch_reject_requests(
+    payload: AdminBatchAction,
+    db: Session = Depends(get_db),
+    admin_user: User = Depends(get_admin_user),
+    settings: Settings = Depends(get_app_settings),
+) -> AdminBatchActionResult:
+    items: list[Request] = []
+    skipped: list[AdminBatchSkippedItem] = []
+
+    for request_id in dedupe_request_ids(payload.request_ids):
+        request = get_request_or_none(db, request_id)
+        if request is None:
+            skipped.append(AdminBatchSkippedItem(request_id=request_id, detail="Request not found."))
+            continue
+
+        try:
+            execute_reject_action(
+                db,
+                request,
+                admin_user=admin_user,
+                note=payload.note,
+            )
+            items.append(request)
+        except HTTPException as exc:
+            skipped.append(AdminBatchSkippedItem(request_id=request_id, detail=str(exc.detail)))
+
+    db.commit()
+    for item in items:
+        db.refresh(item)
+        await notify_request_status_change(settings, item)
+    await send_telegram_message(
+        settings,
+        chat_id=admin_user.tg_user_id,
+        text=build_batch_summary_text(
+            action_label="批量拒绝",
+            processed_count=len(items),
+            skipped_count=len(skipped),
+            processed_ids=[str(item.public_id or item.id) for item in items],
+        ),
+    )
+    return build_batch_response(items, skipped)

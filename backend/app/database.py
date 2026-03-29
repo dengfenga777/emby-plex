@@ -54,10 +54,16 @@ def apply_schema_patches() -> None:
 
     if "notification_chat_id" not in request_columns:
         statements.append("ALTER TABLE requests ADD COLUMN notification_chat_id BIGINT")
+    if "notification_message_id" not in request_columns:
+        statements.append("ALTER TABLE requests ADD COLUMN notification_message_id INTEGER")
     if "notification_message_thread_id" not in request_columns:
         statements.append("ALTER TABLE requests ADD COLUMN notification_message_thread_id INTEGER")
     if "finished_notified_at" not in request_columns:
         statements.append("ALTER TABLE requests ADD COLUMN finished_notified_at DATETIME")
+    if "requester_finished_notified_at" not in request_columns:
+        statements.append("ALTER TABLE requests ADD COLUMN requester_finished_notified_at DATETIME")
+    if "chat_finished_notified_at" not in request_columns:
+        statements.append("ALTER TABLE requests ADD COLUMN chat_finished_notified_at DATETIME")
     if "public_id" not in request_columns:
         statements.append("ALTER TABLE requests ADD COLUMN public_id INTEGER")
 

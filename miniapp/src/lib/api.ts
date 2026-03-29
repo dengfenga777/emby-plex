@@ -1,4 +1,5 @@
 import type {
+  AdminBatchActionResult,
   AdminRequestSummary,
   AdminResourceCandidate,
   RequestDetail,
@@ -9,7 +10,22 @@ import type {
   User,
 } from "./types";
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000/api";
+function resolveApiBaseUrl() {
+  const configuredBaseUrl = import.meta.env.VITE_API_BASE_URL?.trim();
+  if (configuredBaseUrl) {
+    return configuredBaseUrl.replace(/\/$/, "");
+  }
+
+  const isLocalDev =
+    window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+  if (isLocalDev) {
+    return "http://localhost:8000/api";
+  }
+
+  return `${window.location.origin}/api`;
+}
+
+const API_BASE_URL = resolveApiBaseUrl();
 
 async function apiRequest<T>(path: string, init?: RequestInit, token?: string): Promise<T> {
   const headers = new Headers(init?.headers);
@@ -135,6 +151,28 @@ export function rejectRequest(token: string, requestId: string, note?: string) {
     {
       method: "POST",
       body: JSON.stringify({ note }),
+    },
+    token,
+  );
+}
+
+export function bulkSubscribeRequests(token: string, requestIds: string[], note?: string) {
+  return apiRequest<AdminBatchActionResult>(
+    "/admin/batch/requests/subscribe",
+    {
+      method: "POST",
+      body: JSON.stringify({ request_ids: requestIds, note }),
+    },
+    token,
+  );
+}
+
+export function bulkRejectRequests(token: string, requestIds: string[], note?: string) {
+  return apiRequest<AdminBatchActionResult>(
+    "/admin/batch/requests/reject",
+    {
+      method: "POST",
+      body: JSON.stringify({ request_ids: requestIds, note }),
     },
     token,
   );

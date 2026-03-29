@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useDeferredValue, useEffect, useState } from "react";
 
+import { getStatusLabel } from "../lib/requestStatus";
 import { StatusBadge } from "./StatusBadge";
 import type { AdminResourceCandidate, RequestDetail, RequestStatus } from "../lib/types";
 
@@ -196,6 +197,16 @@ function sortResourceCandidates(items: AdminResourceCandidate[], sortMode: Resou
   return nextItems;
 }
 
+function buildMediaTypeLabel(mediaType: string) {
+  if (mediaType === "movie") {
+    return "电影";
+  }
+  if (mediaType === "series") {
+    return "剧集";
+  }
+  return "动漫";
+}
+
 export function RequestDetailPanel({
   item,
   isAdmin,
@@ -213,6 +224,8 @@ export function RequestDetailPanel({
   const [onlyFourK, setOnlyFourK] = useState(false);
   const [subtitleOnly, setSubtitleOnly] = useState(false);
   const [excludeHr, setExcludeHr] = useState(false);
+  const deferredKeyword = useDeferredValue(resourceKeyword);
+  const deferredEpisodeFilter = useDeferredValue(episodeFilter);
 
   useEffect(() => {
     setResourceKeyword("");
@@ -228,7 +241,7 @@ export function RequestDetailPanel({
     return (
       <section className="panel detail-panel">
         <div className="empty-state">
-          <p>选择一条请求后，这里会显示完整状态流和处理日志。</p>
+          <p>选择一条请求后，这里会显示完整状态流、管理员处理建议和资源站筛选结果。</p>
         </div>
       </section>
     );
@@ -236,8 +249,8 @@ export function RequestDetailPanel({
 
   const showAdminTools = isAdmin && canAdminHandle(item.status);
   const isResourceSearchLoaded = resourceRequestId === item.id;
-  const keyword = normalizeText(resourceKeyword);
-  const episodeKeyword = normalizeText(episodeFilter);
+  const keyword = normalizeText(deferredKeyword);
+  const episodeKeyword = normalizeText(deferredEpisodeFilter);
   const activeResourceCandidates = isResourceSearchLoaded ? resourceCandidates : [];
   const hasLoadedResources = isResourceSearchLoaded && activeResourceCandidates.length > 0;
   const filteredResourceCandidates = sortResourceCandidates(
@@ -278,6 +291,10 @@ export function RequestDetailPanel({
     resourceKeyword || episodeFilter || freeOnly || onlyFourK || subtitleOnly || excludeHr || sortMode !== "score_desc",
   );
   const statusSummary = buildStatusSummary(item, isAdmin);
+  const freeCandidateCount = activeResourceCandidates.filter(isFreeCandidate).length;
+  const fourKCandidateCount = activeResourceCandidates.filter(isFourKCandidate).length;
+  const subtitleCandidateCount = activeResourceCandidates.filter(hasChineseSubtitle).length;
+  const leadCandidate = filteredResourceCandidates[0] ?? null;
 
   return (
     <section className="panel detail-panel">
@@ -289,17 +306,48 @@ export function RequestDetailPanel({
         <StatusBadge status={item.status} />
       </div>
 
-      <div className="detail-meta">
-        <span>请求 #{item.public_id}</span>
-        <span>{item.media_type}</span>
-        <span>{item.year ?? "年份待定"}</span>
-        <span>{item.source}</span>
-        <span>请求人：{item.user.nickname}</span>
-      </div>
+      <section className="detail-hero">
+        <div className="detail-poster-shell">
+          {item.poster_url ? (
+            <img src={item.poster_url} alt={item.title} className="detail-poster" />
+          ) : (
+            <div className="detail-poster-fallback">{item.title.slice(0, 2)}</div>
+          )}
+        </div>
 
-      <p className="detail-copy">
-        {item.overview ?? "暂无剧情简介，当前请求由系统保留了标题和来源信息。"}
-      </p>
+        <div className="detail-main">
+          <div className="detail-meta">
+            <span>请求 #{item.public_id}</span>
+            <span>{buildMediaTypeLabel(item.media_type)}</span>
+            <span>{item.year ?? "年份待定"}</span>
+            <span>{item.source}</span>
+            <span>请求人：{item.user.nickname}</span>
+          </div>
+
+          <p className="detail-copy">
+            {item.overview ?? "暂无剧情简介，当前请求由系统保留了标题和来源信息。"}
+          </p>
+
+          <div className="detail-kpi-grid">
+            <article className="mini-stat-card">
+              <span>当前状态</span>
+              <strong>{getStatusLabel(item.status)}</strong>
+            </article>
+            <article className="mini-stat-card">
+              <span>创建时间</span>
+              <strong>{formatTime(item.created_at)}</strong>
+            </article>
+            <article className="mini-stat-card">
+              <span>日志条数</span>
+              <strong>{item.logs.length}</strong>
+            </article>
+            <article className="mini-stat-card">
+              <span>资源站结果</span>
+              <strong>{activeResourceCandidates.length}</strong>
+            </article>
+          </div>
+        </div>
+      </section>
 
       <section className={`status-card status-${item.status}`}>
         <div>
@@ -310,6 +358,7 @@ export function RequestDetailPanel({
         <div className="detail-meta">
           {item.moviepilot_task_id ? <span>任务：{item.moviepilot_task_id}</span> : null}
           {item.admin_note ? <span>备注：{item.admin_note}</span> : null}
+          <span>最近更新：{formatTime(item.updated_at)}</span>
         </div>
       </section>
 
@@ -330,6 +379,43 @@ export function RequestDetailPanel({
               订阅
             </button>
           </div>
+
+          <div className="queue-summary-grid resource-summary-grid">
+            <article className="mini-stat-card">
+              <span>总结果</span>
+              <strong>{activeResourceCandidates.length}</strong>
+            </article>
+            <article className="mini-stat-card">
+              <span>免流</span>
+              <strong>{freeCandidateCount}</strong>
+            </article>
+            <article className="mini-stat-card">
+              <span>4K</span>
+              <strong>{fourKCandidateCount}</strong>
+            </article>
+            <article className="mini-stat-card">
+              <span>中字</span>
+              <strong>{subtitleCandidateCount}</strong>
+            </article>
+          </div>
+
+          {leadCandidate ? (
+            <section className="lead-candidate-card">
+              <p className="eyebrow">Best Current Match</p>
+              <h4>{leadCandidate.title}</h4>
+              <p className="detail-copy">
+                当前筛选下优先级最高的资源会显示在这里，方便管理员先看最值得下手的一条。
+              </p>
+              <div className="detail-meta resource-pills">
+                {leadCandidate.site_name ? <span>{leadCandidate.site_name}</span> : null}
+                {leadCandidate.resource_pix ? <span>{leadCandidate.resource_pix}</span> : null}
+                {leadCandidate.season_episode ? <span>{leadCandidate.season_episode}</span> : null}
+                <span>做种 {leadCandidate.seeders ?? 0}</span>
+                <span>{formatBytes(leadCandidate.size)}</span>
+                <span>优先级 {leadCandidate.score}</span>
+              </div>
+            </section>
+          ) : null}
 
           {hasLoadedResources ? (
             <div className="resource-list">
@@ -492,18 +578,34 @@ export function RequestDetailPanel({
         </section>
       ) : null}
 
-      <div className="log-list">
-        {item.logs.map((log) => (
-          <div key={log.id} className="log-card">
-            <div className="log-heading">
-              <strong>{log.to_status}</strong>
-              <span>{formatTime(log.created_at)}</span>
-            </div>
-            <p>{log.note ?? "没有额外备注。"}</p>
-            <small>{log.operator}</small>
+      <section className="log-section">
+        <div className="panel-header tight">
+          <div>
+            <p className="eyebrow">Logs</p>
+            <h3>处理时间线</h3>
           </div>
-        ))}
-      </div>
+          <span className="panel-meta">{item.logs.length} 条</span>
+        </div>
+
+        <div className="log-list">
+          {item.logs.map((log) => (
+            <div key={log.id} className="log-card">
+              <div className="log-heading">
+                <strong>{getStatusLabel(log.to_status)}</strong>
+                <span>{formatTime(log.created_at)}</span>
+              </div>
+              <p>{log.note ?? "没有额外备注。"}</p>
+              <small>{log.operator}</small>
+            </div>
+          ))}
+
+          {!item.logs.length ? (
+            <div className="empty-state compact">
+              <p>当前还没有日志记录。</p>
+            </div>
+          ) : null}
+        </div>
+      </section>
     </section>
   );
 }

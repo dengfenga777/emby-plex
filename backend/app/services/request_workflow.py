@@ -4,9 +4,18 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from ..enums import RequestStatus
+from ..enums import MediaType, RequestStatus
 from ..models import Request, RequestLog, User
 from .moviepilot import MoviePilotError, MoviePilotService
+
+ACTIVE_REQUEST_STATUSES = {
+    RequestStatus.pending,
+    RequestStatus.approved,
+    RequestStatus.submitted_to_moviepilot,
+    RequestStatus.downloading,
+    RequestStatus.organizing,
+    RequestStatus.finished,
+}
 
 SYNCABLE_STATUSES = {
     RequestStatus.submitted_to_moviepilot,
@@ -98,6 +107,24 @@ async def sync_request_status(
 
 def can_view_request(request: Request, user: User) -> bool:
     return request.user_id == user.id or user.role.value == "admin"
+
+
+def find_existing_active_request(
+    db: Session,
+    *,
+    source_id: str,
+    media_type: MediaType,
+) -> Request | None:
+    return (
+        db.query(Request)
+        .filter(
+            Request.source_id == source_id,
+            Request.media_type == media_type,
+            Request.status.in_(tuple(ACTIVE_REQUEST_STATUSES)),
+        )
+        .order_by(Request.created_at.desc())
+        .first()
+    )
 
 
 def build_submission_failure_message(exc: MoviePilotError) -> str:

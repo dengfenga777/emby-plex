@@ -66,6 +66,7 @@ export interface RequestSummary {
   admin_note: string | null;
   created_at: string;
   updated_at: string;
+  request_reused: boolean;
 }
 
 export interface RequestDetail extends RequestSummary {
@@ -103,6 +104,19 @@ export interface AdminResourceCandidate {
   labels: string[];
   media_payload: Record<string, unknown>;
   torrent_payload: Record<string, unknown>;
+}
+
+export interface AdminBatchSkippedItem {
+  request_id: string;
+  detail: string;
+}
+
+export interface AdminBatchActionResult {
+  processed_count: number;
+  skipped_count: number;
+  processed_ids: string[];
+  skipped: AdminBatchSkippedItem[];
+  items: RequestDetail[];
 }
 
 export interface ApiErrorPayload {
