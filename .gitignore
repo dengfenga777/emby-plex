@@ -16,3 +16,20 @@ __pycache__/
 /miniapp/node_modules
 /miniapp/dist
 /miniapp/*.tsbuildinfo
+
+# Unrelated local projects and large archives
+/PMSManageBot/
+/PMSManageBot-src/
+/tgbot-static-*.tar.gz
+
+# Local ops scripts that aren't part of the MoviePilot request project
+/emby-partial-refresh.sh
+/plex-partial-refresh.sh
+/mp-strm-watcher.sh
+/rclone-wrapper.sh
+/tg-notify.sh
+/gd-rclone-uploader.sh
+/gd-rclone-uploader.service
+/gd-rclone-uploader.timer
+/gd-rclone-uploader@.service
+/gd-rclone-uploader@.timer
